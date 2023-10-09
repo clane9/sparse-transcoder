@@ -3,6 +3,7 @@ A sparse auto-encoder for learning sparse representations.
 
 References:
     https://transformer-circuits.pub/2023/monosemantic-features/index.html
+    https://github.com/jsulam/Online-Dictionary-Learning-demo
 """
 
 from typing import Callable, Optional, Tuple
@@ -117,9 +118,8 @@ class SparseAutoencoder(nn.Module):
         # Each block acts a bit like one iteration of iterative hard thresholding.
         # See work by Jeremias Sulam for more details.
         B = x.size(0)
-        code = torch.zeros(B, self.latent_dim, device=x.device)
-
         x = self.flat(x)
+        code = torch.zeros(B, self.latent_dim, device=x.device)
         for block in self.blocks:
             recon = self.proj(code)
             code = block(x - recon, pre_code=code)
@@ -172,71 +172,3 @@ class SparseLayer(nn.Module):
             code = code + pre_code
         code = self.act(code)
         return code
-
-
-class SparseTranscoder(nn.Module):
-    """
-    A sparse transcoder for translating between high-dimensional feature spaces using
-    two (trained) sparse autoencoders.
-    """
-
-    perm_indices: torch.Tensor
-
-    def __init__(
-        self,
-        encoder: SparseAutoencoder,
-        decoder: SparseAutoencoder,
-    ):
-        super().__init__()
-        assert (
-            encoder.latent_dim == decoder.latent_dim
-        ), "encoder and decoder latent dimensions must match"
-        self.encoder = encoder
-        self.decoder = decoder
-
-        self.register_buffer(
-            "perm_indices", torch.empty(encoder.latent_dim, dtype=torch.int64)
-        )
-        self.update_perm()
-
-    def update_perm(self):
-        perm_indices = align_latents(self.encoder, self.decoder)
-        self.perm_indices.copy_(perm_indices)
-
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        code = self.encoder.encode(x)
-        code = code[:, self.perm_indices]
-        out = self.decoder.decode(code)
-        return out, code
-
-
-def align_latents(encoder: SparseAutoencoder, decoder: SparseAutoencoder):
-    """
-    Return indices to apply to the encoder latents so that they are aligned with the
-    decoder latents.
-    """
-    enc_loadings = encoder.loadings()
-    dec_loadings = decoder.loadings()
-    indices = permute_align(enc_loadings, dec_loadings)
-    return indices
-
-
-def permute_align(input: torch.Tensor, target: torch.Tensor):
-    """
-    Given 1D arrays `input`, `target` find indices such that `input[indices] ~= target`.
-
-    Example::
-
-    >>> import torch
-    >>> target = torch.rand(10)
-    >>> input = target[torch.randperm(10)]
-    >>> indices = permute_align(input, target)
-    >>> print(torch.allclose(input[indices], target))
-    True
-    """
-    # First sort input then unsort by target's order.
-    ind1 = torch.argsort(input)
-    ind2 = torch.argsort(target)
-    rank2 = torch.argsort(ind2)
-    indices = ind1[rank2]
-    return indices
