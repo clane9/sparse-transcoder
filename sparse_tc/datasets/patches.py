@@ -1,23 +1,25 @@
 import logging
+import math
 import os
+from functools import partial
 from pathlib import Path
-from typing import Optional, Union
+from typing import Callable, Optional
 
 import numpy as np
 import torch
 from einops import rearrange
 from torch.utils.data import Dataset, TensorDataset
 
-from .image import imagenet
+from .image import cifar10, imagenet
 from .registry import DatasetPair, register_dataset
 
 
 def extract_patches(
     dataset: Dataset,
     patch_size: int = 32,
-    num_images: int = 100,
+    num_patches: int = 60000,
     seed: int = 42,
-):
+) -> torch.Tensor:
     """
     Extract patches from a dataset of images.
 
@@ -28,13 +30,17 @@ def extract_patches(
         seed: random seed for reproducibility
     """
     rng = np.random.default_rng(seed)
-    indices = rng.permutation(len(dataset))[:num_images]
 
-    def get_image(idx):
+    def get_image(idx) -> torch.Tensor:
         sample = dataset[idx]
         if isinstance(sample, tuple):
             return sample[0]
         return sample
+
+    img = get_image(0)
+    H = img.size(1)
+    num_images = math.ceil(num_patches / ((H // patch_size) ** 2))
+    indices = rng.permutation(len(dataset))[:num_images]
 
     images = torch.stack([get_image(idx) for idx in indices])
     patches = rearrange(
@@ -46,14 +52,48 @@ def extract_patches(
     return patches
 
 
+def image_patch_dataset(
+    ds_factory: Callable[[], DatasetPair],
+    out_dir: Optional[Path] = None,
+    patch_size: int = 16,
+    num_train: int = 60000,
+    num_val: int = 10000,
+):
+    if out_dir is not None:
+        train_path = out_dir / "train_patches.pt"
+        val_path = out_dir / "val_patches.pt"
+        if train_path.exists() and val_path.exists():
+            logging.info(f"Loading cached dataset from {out_dir}")
+            train_ds = TensorDataset(torch.load(train_path))
+            val_ds = TensorDataset(torch.load(val_path))
+            return train_ds, val_ds
+
+    train_images, val_images = ds_factory()
+
+    logging.info("Extracting patches")
+    train_patches = extract_patches(train_images, patch_size, num_train)
+    val_patches = extract_patches(val_images, patch_size, num_val)
+    logging.info(
+        f"\n  Train patches: {train_patches.shape}"
+        f"\n  Val patches: {val_patches.shape}"
+    )
+
+    if out_dir is not None:
+        logging.info(f"Saving patches to {out_dir}")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(train_patches, train_path)
+        torch.save(val_patches, val_path)
+
+    train_ds = TensorDataset(train_patches)
+    val_ds = TensorDataset(train_patches)
+    return train_ds, val_ds
+
+
 @register_dataset("imagenet_patches")
 def imagenet_patches(
     root: Optional[str] = None,
     patch_size: int = 16,
     image_size: int = 224,
-    num_images: int = 100,
-    seed: int = 42,
-    cache_dir: Optional[Union[str, Path]] = None,
     **kwargs,
 ) -> DatasetPair:
     """
@@ -61,43 +101,46 @@ def imagenet_patches(
     """
     logging.info(
         "Loading ImageNet patches "
-        f"(patch_size={patch_size}, image_size={image_size}, "
-        f"num_images={num_images}, seed={seed})"
+        f"(patch_size={patch_size}, image_size={image_size})"
     )
     if kwargs:
         logging.warning("Extra unused kwargs: %s", kwargs)
     root = root or os.environ.get("IMAGENET_ROOT")
-    cache_dir = cache_dir or os.environ.get("SPARSETC_CACHE_DIR") or ".cache"
+    cache_dir = os.environ.get("SPARSE_TC_CACHE_DIR") or ".cache"
 
-    ds_dir = (
+    out_dir = (
         Path(cache_dir)
         / "datasets"
         / "imagenet_patches"
-        / f"ps-{patch_size}_is-{image_size}_n-{num_images}_s-{seed}"
+        / f"p-{patch_size}_i-{image_size}"
     )
-    train_path = ds_dir / "train.pt"
-    val_path = ds_dir / "val.pt"
-    if train_path.exists() and val_path.exists():
-        logging.info(f"Loading cached dataset from {ds_dir}")
-        train_ds = TensorDataset(torch.load(train_path))
-        val_ds = TensorDataset(torch.load(val_path))
-        return train_ds, val_ds
-
-    train_in1k, val_in1k = imagenet(root=root, image_size=image_size, crop_pct=1.0)
-
-    logging.info("Extracting patches")
-    train_patches = extract_patches(train_in1k, patch_size, num_images, seed)
-    val_patches = extract_patches(val_in1k, patch_size, num_images, seed)
-    logging.info(
-        f"\n  Train patches: {train_patches.shape}"
-        f"\n  Val patches: {val_patches.shape}"
+    train_ds, val_ds = image_patch_dataset(
+        ds_factory=partial(imagenet, root=root, image_size=image_size, crop_pct=1.0),
+        out_dir=out_dir,
+        patch_size=patch_size,
     )
+    return train_ds, val_ds
 
-    logging.info(f"Saving patches to {ds_dir}")
-    ds_dir.mkdir(parents=True, exist_ok=True)
-    torch.save(train_patches, train_path)
-    torch.save(val_patches, val_path)
 
-    train_ds = TensorDataset(train_patches)
-    val_ds = TensorDataset(train_patches)
+@register_dataset("cifar10_patches")
+def cifar10_patches(
+    root: Optional[str] = None,
+    patch_size: int = 16,
+    **kwargs,
+) -> DatasetPair:
+    """
+    A dataset of image patches extracted from ImageNet.
+    """
+    logging.info(f"Loading CIFAR10 patches (patch_size={patch_size})")
+    if kwargs:
+        logging.warning("Extra unused kwargs: %s", kwargs)
+    root = root or os.environ.get("CIFAR10_ROOT")
+    cache_dir = os.environ.get("SPARSE_TC_CACHE_DIR") or ".cache"
+
+    out_dir = Path(cache_dir) / "datasets" / "cifar10_patches" / f"p-{patch_size}"
+    train_ds, val_ds = image_patch_dataset(
+        ds_factory=partial(cifar10, root=root),
+        out_dir=out_dir,
+        patch_size=patch_size,
+    )
     return train_ds, val_ds
