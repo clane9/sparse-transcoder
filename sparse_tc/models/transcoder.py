@@ -39,7 +39,7 @@ class SparseTranscoder(nn.Module):
         decoder. The encoder latent dimensions are sorted so that their loadings
         approximately match the decoder.
         """
-        perm_indices = permute_align(self.encoder.loadings(), self.decoder.loadings())
+        perm_indices = permute_align(self.encoder.loading(), self.decoder.loading())
         self.perm_indices.copy_(perm_indices)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:

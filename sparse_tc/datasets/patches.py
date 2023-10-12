@@ -17,7 +17,7 @@ from .registry import DatasetPair, register_dataset
 def extract_patches(
     dataset: Dataset,
     patch_size: int = 32,
-    num_patches: int = 60000,
+    num_patches: int = 50000,
     seed: int = 42,
 ) -> torch.Tensor:
     """
@@ -56,7 +56,7 @@ def image_patch_dataset(
     ds_factory: Callable[[], DatasetPair],
     out_dir: Optional[Path] = None,
     patch_size: int = 16,
-    num_train: int = 60000,
+    num_train: int = 50000,
     num_val: int = 10000,
 ):
     if out_dir is not None:
@@ -109,10 +109,7 @@ def imagenet_patches(
     cache_dir = os.environ.get("SPARSE_TC_CACHE_DIR") or ".cache"
 
     out_dir = (
-        Path(cache_dir)
-        / "datasets"
-        / "imagenet_patches"
-        / f"p-{patch_size}_i-{image_size}"
+        Path(cache_dir) / "datasets" / f"imagenet_patches_p-{patch_size}_i-{image_size}"
     )
     train_ds, val_ds = image_patch_dataset(
         ds_factory=partial(imagenet, root=root, image_size=image_size, crop_pct=1.0),
@@ -137,7 +134,7 @@ def cifar10_patches(
     root = root or os.environ.get("CIFAR10_ROOT")
     cache_dir = os.environ.get("SPARSE_TC_CACHE_DIR") or ".cache"
 
-    out_dir = Path(cache_dir) / "datasets" / "cifar10_patches" / f"p-{patch_size}"
+    out_dir = Path(cache_dir) / "datasets" / f"cifar10_patches_p-{patch_size}"
     train_ds, val_ds = image_patch_dataset(
         ds_factory=partial(cifar10, root=root),
         out_dir=out_dir,

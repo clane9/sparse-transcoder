@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from torchvision import transforms
 from torchvision.datasets import CIFAR10, ImageNet
@@ -13,7 +13,7 @@ from .registry import DatasetPair, register_dataset
 
 @register_dataset("imagenet")
 def imagenet(
-    root: Optional[str] = None,
+    root: Optional[Union[str, Path]] = None,
     image_size: int = 224,
     crop_pct: float = 0.875,
     **kwargs,
@@ -25,7 +25,7 @@ def imagenet(
     logging.info(
         f"Loading ImageNet (root={root}, image_size={image_size}, crop_pct={crop_pct})"
     )
-    if root is None:
+    if not root:
         raise ValueError(
             "Either root or environment variable IMAGENET_ROOT is required"
         )
@@ -52,14 +52,17 @@ def imagenet(
 
 
 @register_dataset("cifar10")
-def cifar10(root: Optional[str] = None, **kwargs) -> DatasetPair:
+def cifar10(root: Optional[Union[str, Path]] = None, **kwargs) -> DatasetPair:
     """
     Load CIFAR-10 dataset.
     """
     root = root or os.environ.get("CIFAR10_ROOT")
-    if root is None:
+    if not root:
         cache_dir = os.environ.get("SPARSE_TC_CACHE_DIR") or ".cache"
         root = Path(cache_dir) / "datasets" / "cifar10"
+    else:
+        root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
     logging.info(f"Loading CIFAR-10 (root={root})")
     if kwargs:
         logging.warning("Extra unused kwargs: %s", kwargs)

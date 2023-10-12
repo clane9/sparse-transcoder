@@ -6,7 +6,7 @@ References:
     https://github.com/jsulam/Online-Dictionary-Learning-demo
 """
 
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, Union
 
 import lightning.pytorch as pl
 import numpy as np
@@ -24,8 +24,8 @@ class LitSparseAE(pl.LightningModule):
 
     def __init__(
         self,
-        in_features: int,
-        latent_ratio: float = 8.0,
+        in_shape: int,
+        latent_dim: int,
         depth: int = 1,
         lambd: float = 0.1,
         lr: float = 1e-3,
@@ -34,27 +34,45 @@ class LitSparseAE(pl.LightningModule):
     ):
         super().__init__()
         self.save_hyperparameters()
-        self.coder = SparseAutoencoder(
-            in_features=in_features,
-            latent_ratio=latent_ratio,
+        self.main = SparseAutoencoder(
+            in_shape=in_shape,
+            latent_dim=latent_dim,
             depth=depth,
         )
 
-    def training_step(self, batch: torch.Tensor, batch_idx: int):
-        recon, code = self.coder(batch)
+    def forward(
+        self, batch: Union[Tuple[torch.Tensor, ...], torch.Tensor]
+    ) -> torch.Tensor:
+        if isinstance(batch, (list, tuple)):
+            batch = batch[0]
+        return self.main(batch)
+
+    def training_step(self, batch, batch_idx):
+        recon, code = self(batch)
         loss = self.loss_fn(batch, recon, code)
+        sparsity = torch.sum(code.detach() > 0, dim=1).float().mean()
         self.log("train_loss", loss)
+        self.log("train_sparsity", sparsity)
         return loss
 
-    def validation_step(self, batch: torch.Tensor, batch_idx: int):
-        recon, code = self.coder(batch)
+    def validation_step(self, batch, batch_idx):
+        recon, code = self(batch)
         loss = self.loss_fn(batch, recon, code)
+        sparsity = torch.sum(code.detach() > 0, dim=1).float().mean()
         self.log("val_loss", loss)
+        self.log("val_sparsity", sparsity)
         return loss
 
-    def loss_fn(self, x: torch.Tensor, recon: torch.Tensor, code: torch.Tensor):
+    def loss_fn(
+        self,
+        batch: Union[Tuple[torch.Tensor, ...], torch.Tensor],
+        recon: torch.Tensor,
+        code: torch.Tensor,
+    ):
+        if isinstance(batch, (list, tuple)):
+            batch = batch[0]
         # Note that codes are non-negative.
-        return F.mse_loss(recon, x) + self.hparams.lambd * torch.mean(code)
+        return F.mse_loss(recon, batch) + self.hparams.lambd * torch.mean(code)
 
     def configure_optimizers(self):
         optimizer = optim.AdamW(
@@ -74,21 +92,20 @@ class SparseAutoencoder(nn.Module):
 
     Args:
         in_shape: input feature shape
-        latent_ratio: latent dimension is `latent_ratio * in_features`
+        latent_dim: sparse latent dimension
         depth: number of layers
     """
 
     def __init__(
         self,
         in_shape: Tuple[int, ...],
-        latent_ratio: float = 8.0,
+        latent_dim: int,
         depth: int = 1,
     ):
         super().__init__()
         self.in_shape = in_shape
         self.in_features = np.prod(in_shape)
-        self.latent_ratio = latent_ratio
-        self.latent_dim = int(latent_ratio * self.in_features)
+        self.latent_dim = latent_dim
 
         self.flat = nn.Flatten()
         self.blocks = nn.ModuleList(
@@ -96,8 +113,9 @@ class SparseAutoencoder(nn.Module):
         )
         self.proj = nn.Linear(self.latent_dim, self.in_features)
         self.unflat = nn.Unflatten(1, in_shape)
+
         # Just for recording sparse code stats
-        self.stats = nn.BatchNorm1d(self.latent_dim, affine=False)
+        self.loading_ema = EMA(self.latent_dim)
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -108,7 +126,7 @@ class SparseAutoencoder(nn.Module):
         recon = self.decode(code)
 
         # Update code stats.
-        self.stats(code.detach())
+        self.loading_ema(code.mean(dim=0))
         return recon, code
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -117,6 +135,10 @@ class SparseAutoencoder(nn.Module):
         """
         # Each block acts a bit like one iteration of iterative hard thresholding.
         # See work by Jeremias Sulam for more details.
+        #
+        # Note that the Anthropic sparse autoencoder subtracts the decoder bias from x
+        # before embedding. We achieve the same thing by initializing the code to 0 and
+        # subtracting the reconstruction at every step.
         B = x.size(0)
         x = self.flat(x)
         code = torch.zeros(B, self.latent_dim, device=x.device)
@@ -133,11 +155,11 @@ class SparseAutoencoder(nn.Module):
         recon = self.unflat(recon)
         return recon
 
-    def loadings(self) -> torch.Tensor:
+    def loading(self) -> torch.Tensor:
         """
-        Get the "loadings" on each atom. (I.e. the running mean of the codes.)
+        Get the "loading" on each atom. (I.e. the running mean of the codes.)
         """
-        return self.stats.running_mean
+        return self.loading_ema.running_mean
 
     def atoms(self) -> torch.Tensor:
         """
@@ -172,3 +194,37 @@ class SparseLayer(nn.Module):
             code = code + pre_code
         code = self.act(code)
         return code
+
+
+class EMA(nn.Module):
+    """
+    Track the exponential moving average of a tensor.
+    """
+
+    step: torch.Tensor
+    running_mean: torch.Tensor
+
+    def __init__(self, shape: Union[int, Tuple[int, ...]], momentum: float = 0.9):
+        super().__init__()
+        self.shape = shape
+        self.momentum = momentum
+
+        self.register_buffer("running_mean", torch.empty(shape))
+        self.register_buffer("step", torch.tensor(0, dtype=torch.int64))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.training:
+            self.update(x)
+        return self.running_mean
+
+    def update(self, x: torch.Tensor):
+        x = x.detach()
+        step = self.step.item()
+        if step == 0:
+            self.running_mean.data.copy_(x)
+        else:
+            self.running_mean.data.mul_(self.momentum).add_(x, alpha=1 - self.momentum)
+        self.step.add_(1)
+
+    def extra_repr(self) -> str:
+        return f"shape={self.shape}, momentum={self.momentum:.2f}"
